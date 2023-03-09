@@ -2,6 +2,7 @@
 
 KBUILD_OPTIONS += CAMERA_KERNEL_ROOT=$(shell pwd)
 KBUILD_OPTIONS += KERNEL_ROOT=$(ROOT_DIR)/$(KERNEL_DIR)
+KBUILD_OPTIONS += KBUILD_EXTRA_SYMBOLS=$(OUT_DIR)/../msm-modules/mmrm-driver/Module.symvers
 KBUILD_OPTIONS += MODNAME=camera
 
 all: modules
