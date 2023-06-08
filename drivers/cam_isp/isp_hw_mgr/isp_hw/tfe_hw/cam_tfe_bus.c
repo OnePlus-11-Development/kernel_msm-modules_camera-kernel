@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2019-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/ratelimit.h>
@@ -71,11 +71,14 @@ struct cam_tfe_bus_common_data {
 	uint32_t                                    num_sec_out;
 	uint32_t                                    comp_done_shift;
 	uint32_t                                    rdi_width;
+	uint32_t                                    en_cfg_shift;
+	uint32_t                                    height_shift;
 	bool                                        is_lite;
 	bool                                        support_consumed_addr;
 	cam_hw_mgr_event_cb_func                    event_cb;
 	bool                        rup_irq_enable[CAM_TFE_BUS_RUP_GRP_MAX];
 	bool                                        pdaf_rdi2_mux_en;
+	uint32_t                                    pack_align_shift;
 };
 
 struct cam_tfe_bus_wm_resource_data {
@@ -182,6 +185,9 @@ static bool cam_tfe_bus_can_be_secure(uint32_t out_id)
 	case CAM_TFE_BUS_TFE_OUT_DS4:
 	case CAM_TFE_BUS_TFE_OUT_DS16:
 	case CAM_TFE_BUS_TFE_OUT_AI:
+	case CAM_TFE_BUS_TFE_OUT_PD_LCR_STATS:
+	case CAM_TFE_BUS_TFE_OUT_PD_PREPROCESSED:
+	case CAM_TFE_BUS_TFE_OUT_PD_PARSED:
 		return true;
 
 	case CAM_TFE_BUS_TFE_OUT_STATS_HDR_BE:
@@ -229,6 +235,12 @@ static enum cam_tfe_bus_tfe_out_id
 		return CAM_TFE_BUS_TFE_OUT_DS16;
 	case CAM_ISP_TFE_OUT_RES_AI:
 		return CAM_TFE_BUS_TFE_OUT_AI;
+	case CAM_ISP_TFE_OUT_RES_PD_LCR_STATS:
+		return CAM_TFE_BUS_TFE_OUT_PD_LCR_STATS;
+	case CAM_ISP_TFE_OUT_RES_PD_PREPROCESSED:
+		return CAM_TFE_BUS_TFE_OUT_PD_PREPROCESSED;
+	case CAM_ISP_TFE_OUT_RES_PD_PARSED:
+		return CAM_TFE_BUS_TFE_OUT_PD_PARSED;
 	default:
 		return CAM_TFE_BUS_TFE_OUT_MAX;
 	}
@@ -346,6 +358,17 @@ static int cam_tfe_bus_get_num_wm(
 			break;
 		}
 		break;
+	case CAM_TFE_BUS_TFE_OUT_PD_LCR_STATS:
+	case CAM_TFE_BUS_TFE_OUT_PD_PREPROCESSED:
+	case CAM_TFE_BUS_TFE_OUT_PD_PARSED:
+		switch (format) {
+		case CAM_FORMAT_PLAIN16_10:
+		case CAM_FORMAT_PLAIN64:
+			return 1;
+		default:
+			break;
+		}
+		break;
 	default:
 		break;
 	}
@@ -354,6 +377,47 @@ static int cam_tfe_bus_get_num_wm(
 		format, out_res_id);
 
 	return -EINVAL;
+}
+
+static int cam_tfe_lite_bus_get_wm_idx(
+	enum cam_tfe_bus_tfe_out_id tfe_out_res_id,
+	enum cam_tfe_bus_plane_type plane)
+{
+	int wm_idx = -1;
+
+	switch (tfe_out_res_id) {
+	case CAM_TFE_BUS_TFE_OUT_RDI0:
+		switch (plane) {
+		case PLANE_Y:
+			wm_idx = 0;
+			break;
+		default:
+			break;
+		}
+		break;
+	case CAM_TFE_BUS_TFE_OUT_RDI1:
+		switch (plane) {
+		case PLANE_Y:
+			wm_idx = 1;
+			break;
+		default:
+			break;
+		}
+		break;
+	case CAM_TFE_BUS_TFE_OUT_RDI2:
+		switch (plane) {
+		case PLANE_Y:
+			wm_idx = 2;
+			break;
+		default:
+			break;
+		}
+		break;
+	default:
+		break;
+	}
+
+	return wm_idx;
 }
 
 static int cam_tfe_bus_get_wm_idx(
@@ -505,6 +569,33 @@ static int cam_tfe_bus_get_wm_idx(
 			break;
 		}
 		break;
+	case CAM_TFE_BUS_TFE_OUT_PD_LCR_STATS:
+		switch (plane) {
+		case PLANE_Y:
+			wm_idx = 16;
+			break;
+		default:
+			break;
+		}
+		break;
+	case CAM_TFE_BUS_TFE_OUT_PD_PREPROCESSED:
+		switch (plane) {
+		case PLANE_Y:
+			wm_idx = 17;
+			break;
+		default:
+			break;
+		}
+		break;
+	case CAM_TFE_BUS_TFE_OUT_PD_PARSED:
+		switch (plane) {
+		case PLANE_Y:
+			wm_idx = 18;
+			break;
+		default:
+			break;
+		}
+		break;
 	default:
 		break;
 	}
@@ -556,7 +647,7 @@ static int cam_tfe_bus_acquire_rdi_wm(
 {
 	int pack_fmt = 0;
 	int rdi_width = rsrc_data->common_data->rdi_width;
-
+	int en_cfg_shift = rsrc_data->common_data->en_cfg_shift;
 	if (rdi_width == 64)
 		pack_fmt = 0xa;
 	else if (rdi_width == 128)
@@ -576,7 +667,7 @@ static int cam_tfe_bus_acquire_rdi_wm(
 			rsrc_data->height = 0;
 			rsrc_data->stride =
 				CAM_TFE_RDI_BUS_DEFAULT_STRIDE;
-			rsrc_data->en_cfg = (0x1 << 16) | 0x1;
+			rsrc_data->en_cfg = (0x1 << en_cfg_shift) | 0x1;
 		}
 		break;
 	case CAM_FORMAT_MIPI_RAW_8:
@@ -593,7 +684,7 @@ static int cam_tfe_bus_acquire_rdi_wm(
 			rsrc_data->height = 0;
 			rsrc_data->stride =
 				CAM_TFE_RDI_BUS_DEFAULT_STRIDE;
-			rsrc_data->en_cfg = (0x1 << 16) | 0x1;
+			rsrc_data->en_cfg = (0x1 << en_cfg_shift) | 0x1;
 		}
 		break;
 	case CAM_FORMAT_MIPI_RAW_10:
@@ -609,7 +700,7 @@ static int cam_tfe_bus_acquire_rdi_wm(
 			rsrc_data->height = 0;
 			rsrc_data->stride =
 				CAM_TFE_RDI_BUS_DEFAULT_STRIDE;
-			rsrc_data->en_cfg = (0x1 << 16) | 0x1;
+			rsrc_data->en_cfg = (0x1 << en_cfg_shift) | 0x1;
 		}
 		break;
 	case CAM_FORMAT_MIPI_RAW_12:
@@ -625,7 +716,7 @@ static int cam_tfe_bus_acquire_rdi_wm(
 			rsrc_data->height = 0;
 			rsrc_data->stride =
 				CAM_TFE_RDI_BUS_DEFAULT_STRIDE;
-			rsrc_data->en_cfg = (0x1 << 16) | 0x1;
+			rsrc_data->en_cfg = (0x1 << en_cfg_shift) | 0x1;
 		}
 		break;
 	case CAM_FORMAT_MIPI_RAW_14:
@@ -641,7 +732,7 @@ static int cam_tfe_bus_acquire_rdi_wm(
 			rsrc_data->height = 0;
 			rsrc_data->stride =
 				CAM_TFE_RDI_BUS_DEFAULT_STRIDE;
-			rsrc_data->en_cfg = (0x1 << 16) | 0x1;
+			rsrc_data->en_cfg = (0x1 << en_cfg_shift) | 0x1;
 		}
 		break;
 	case CAM_FORMAT_PLAIN16_10:
@@ -661,7 +752,7 @@ static int cam_tfe_bus_acquire_rdi_wm(
 			rsrc_data->height = 0;
 			rsrc_data->stride =
 				CAM_TFE_RDI_BUS_DEFAULT_STRIDE;
-			rsrc_data->en_cfg = (0x1 << 16) | 0x1;
+			rsrc_data->en_cfg = (0x1 << en_cfg_shift) | 0x1;
 		}
 		break;
 
@@ -679,7 +770,7 @@ static int cam_tfe_bus_acquire_rdi_wm(
 			rsrc_data->height = 0;
 			rsrc_data->stride =
 				CAM_TFE_RDI_BUS_DEFAULT_STRIDE;
-			rsrc_data->en_cfg = (0x1 << 16) | 0x1;
+			rsrc_data->en_cfg = (0x1 << en_cfg_shift) | 0x1;
 		}
 		break;
 	default:
@@ -706,14 +797,16 @@ static int cam_tfe_bus_acquire_wm(
 	struct cam_tfe_bus_wm_resource_data  *rsrc_data = NULL;
 	uint32_t wm_idx = 0;
 	int rc = 0;
-
 	*wm_res = NULL;
 	/* No need to allocate for BUS TFE OUT to WM is fixed. */
-	wm_idx = cam_tfe_bus_get_wm_idx(tfe_out_res_id, plane,
-		bus_priv->common_data.pdaf_rdi2_mux_en);
+	if (bus_priv->common_data.is_lite)
+		wm_idx = cam_tfe_lite_bus_get_wm_idx(tfe_out_res_id, plane);
+	else
+		wm_idx = cam_tfe_bus_get_wm_idx(tfe_out_res_id, plane,
+			bus_priv->common_data.pdaf_rdi2_mux_en);
 	if (wm_idx < 0 || wm_idx >= bus_priv->num_client) {
-		CAM_ERR(CAM_ISP, "Unsupported TFE out %d plane %d",
-			tfe_out_res_id, plane);
+		CAM_ERR(CAM_ISP, "Unsupported TFE out %d plane %d wm id %d num client %d",
+			tfe_out_res_id, plane, wm_idx, bus_priv->num_client);
 		return -EINVAL;
 	}
 
@@ -749,8 +842,8 @@ static int cam_tfe_bus_acquire_wm(
 	/* Set WM offset value to default */
 	rsrc_data->offset  = 0;
 
-	if (((rsrc_data->index >= 7) && (rsrc_data->index <= 9)) &&
-		(tfe_out_res_id != CAM_TFE_BUS_TFE_OUT_PDAF)) {
+	if (bus_priv->common_data.is_lite || (((rsrc_data->index >= 7) &&
+		(rsrc_data->index <= 9)) && (tfe_out_res_id != CAM_TFE_BUS_TFE_OUT_PDAF))) {
 		/* WM 7-9 refers to RDI 0/ RDI 1/RDI 2 */
 		rc = cam_tfe_bus_acquire_rdi_wm(rsrc_data);
 		if (rc)
@@ -813,11 +906,52 @@ static int cam_tfe_bus_acquire_wm(
 		rsrc_data->width = 0;
 		rsrc_data->height = 0;
 		rsrc_data->stride = 1;
-		rsrc_data->en_cfg = (0x1 << 16) | 0x1;
+		rsrc_data->en_cfg = (0x1 << rsrc_data->common_data->en_cfg_shift) | 0x1;
 
 		/*RS state packet format*/
 		if (rsrc_data->index == 15)
 			rsrc_data->pack_fmt = 0x9;
+	} else if (rsrc_data->index == 16) {
+		/* LCR */
+		switch (rsrc_data->format) {
+		case CAM_FORMAT_PLAIN64:
+			rsrc_data->width = 0;
+			rsrc_data->height = 0;
+			rsrc_data->stride = 1;
+			rsrc_data->en_cfg = 0x1;
+			break;
+		default:
+			CAM_ERR(CAM_ISP, "Invalid format %d out_type:%d index: %d",
+				rsrc_data->format, tfe_out_res_id, rsrc_data->index);
+			return -EINVAL;
+		}
+	} else if (rsrc_data->index == 17) {
+		/* PD_PREPROCESSED */
+		switch (rsrc_data->format) {
+		case CAM_FORMAT_PLAIN16_10:
+			rsrc_data->stride = ALIGNUP(rsrc_data->width * 2, 8);
+			rsrc_data->en_cfg = 0x1;
+			break;
+		default:
+			CAM_ERR(CAM_ISP, "Invalid format %d out_type:%d index: %d",
+				rsrc_data->format, tfe_out_res_id, rsrc_data->index);
+			return -EINVAL;
+		}
+	} else if (rsrc_data->index == 18) {
+		/* PD PARSED */
+		switch (rsrc_data->format) {
+		case CAM_FORMAT_PLAIN16_10:
+			rsrc_data->stride = ALIGNUP(rsrc_data->width * 2, 8);
+			rsrc_data->en_cfg = 0x1;
+			/* LSB aligned */
+			rsrc_data->pack_fmt |= (1 <<
+				bus_priv->common_data.pack_align_shift);
+			break;
+		default:
+			CAM_ERR(CAM_ISP, "Invalid format %d out_type:%d index: %d",
+				rsrc_data->format, tfe_out_res_id, rsrc_data->index);
+			return -EINVAL;
+		}
 	} else {
 		CAM_ERR(CAM_ISP, "Invalid WM:%d requested", rsrc_data->index);
 		return -EINVAL;
@@ -870,9 +1004,10 @@ static int cam_tfe_bus_start_wm(struct cam_isp_resource_node *wm_res)
 	struct cam_tfe_bus_common_data        *common_data =
 		rsrc_data->common_data;
 
-	cam_io_w(0xf, common_data->mem_base + rsrc_data->hw_regs->bw_limit);
+	int height_shift = rsrc_data->common_data->height_shift;
 
-	cam_io_w((rsrc_data->height << 16) | rsrc_data->width,
+	cam_io_w(0xf, common_data->mem_base + rsrc_data->hw_regs->bw_limit);
+	cam_io_w((rsrc_data->height << height_shift) | rsrc_data->width,
 		common_data->mem_base + rsrc_data->hw_regs->image_cfg_0);
 	cam_io_w(rsrc_data->pack_fmt,
 		common_data->mem_base + rsrc_data->hw_regs->packer_cfg);
@@ -1736,6 +1871,8 @@ static const char *cam_tfe_bus_rup_type(
 		return "RDI1 RUP";
 	case CAM_ISP_HW_TFE_IN_RDI2:
 		return "RDI2 RUP";
+	case CAM_ISP_HW_TFE_IN_PDLIB:
+		return "PDLIB RUP";
 	default:
 		return "invalid rup group";
 	}
@@ -2061,7 +2198,8 @@ static int cam_tfe_bus_update_wm(void *priv, void *cmd_args,
 
 		wm_data = tfe_out_data->wm_res[i]->res_priv;
 		/* update width register */
-		val = ((wm_data->height << 16) | (wm_data->width & 0xFFFF));
+		val = ((wm_data->height << wm_data->common_data->height_shift) |
+			(wm_data->width & 0xFFFF));
 		CAM_TFE_ADD_REG_VAL_PAIR(reg_val_pair, j,
 			wm_data->hw_regs->image_cfg_0, val);
 		CAM_DBG(CAM_ISP, "WM:%d image height and width 0x%x",
@@ -2559,6 +2697,9 @@ int cam_tfe_bus_init(
 		hw_info->support_consumed_addr;
 	bus_priv->common_data.pdaf_rdi2_mux_en = hw_info->pdaf_rdi2_mux_en;
 	bus_priv->common_data.rdi_width = hw_info->rdi_width;
+	bus_priv->common_data.en_cfg_shift = hw_info->en_cfg_shift;
+	bus_priv->common_data.height_shift = hw_info->height_shift;
+	bus_priv->common_data.pack_align_shift = hw_info->pack_align_shift;
 
 	for (i = 0; i < CAM_TFE_BUS_IRQ_REGISTERS_MAX; i++)
 		bus_priv->bus_irq_error_mask[i] =
